@@ -8,9 +8,11 @@ from config import DATABASE_PATH
 # Глобальный lock для SQLite (на всякий случай)
 _db_lock = threading.RLock()
 
+# shared/database.py
+
 def init_db():
     with get_db_connection() as conn:
-        conn.execute('PRAGMA journal_mode=WAL;')  # Включаем WAL для concurrency
+        conn.execute('PRAGMA journal_mode=WAL;')
         conn.execute('''
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,7 +27,8 @@ def init_db():
                 pin BOOLEAN NOT NULL DEFAULT 0,
                 notify BOOLEAN NOT NULL DEFAULT 1,
                 delete_after_days INTEGER,
-                active BOOLEAN NOT NULL DEFAULT 1
+                active BOOLEAN NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         ''')
         conn.commit()
