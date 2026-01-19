@@ -1,0 +1,26 @@
+version: '3'
+services:
+  bot:
+    build: .
+    command: python telegram_bot.py
+    volumes:
+      - .//data
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - AUTHORIZED_USER_IDS=${AUTHORIZED_USER_IDS}
+      - TIMEZONE=${TIMEZONE}
+    restart: unless-stopped
+
+  web:
+    build: .
+    command: python web_api.py
+    ports:
+      - "8080:8080"
+    volumes:
+      - .//data
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - WEB_API_SECRET=${WEB_API_SECRET}
+      - ADMIN_SECRET=${ADMIN_SECRET}
+      - TIMEZONE=${TIMEZONE}
+    restart: unless-stopped
