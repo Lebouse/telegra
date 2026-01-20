@@ -1,5 +1,5 @@
 # web_api.py
-# ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ с исправлением проблемы с формами
+# ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ с исправлением всех проблем
 # Порт: 8081
 # Секрет админки: qwerty12345
 
@@ -144,17 +144,6 @@ class HealthCheckResponse(BaseModel):
     timestamp: str
     database: str
 
-class CreateTaskRequest(BaseModel):
-    secret: Optional[str] = None
-    chat_id: str
-    message_text: str
-    media_file_id: Optional[str] = None
-    publish_at_local: str
-    recurrence: str
-    delete_after_days: Optional[str] = None
-    pin: Optional[str] = "off"
-    notify: Optional[str] = "on"
-
 # === Глобальный middleware для проверки секрета ===
 @app.middleware("http")
 async def admin_secret_middleware(request: Request, call_next):
@@ -277,6 +266,34 @@ def safe_dict(row) -> dict:
     except Exception as e:
         logger.error(f"❌ Ошибка конвертации данных: {e}")
         return {}
+
+def get_safe_redirect_url(base_url: str, secret: str, error: Optional[str] = None) -> str:
+    """
+    Безопасное формирование URL для редиректа с сохранением секрета и ошибки.
+    """
+    from urllib.parse import urlparse, parse_qs, urlunparse
+    
+    parsed = urlparse(base_url)
+    query_params = parse_qs(parsed.query)
+    
+    # Добавляем секрет
+    query_params['secret'] = [secret]
+    
+    # Добавляем ошибку если есть
+    if error:
+        query_params['error'] = [error]
+    
+    # Формируем новый query string
+    new_query = "&".join([f"{k}={quote(v[0])}" for k, v in query_params.items()])
+    
+    return urlunparse((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        parsed.params,
+        new_query,
+        parsed.fragment
+    ))
 
 # === Эндпоинты ===
 
@@ -480,6 +497,10 @@ async def admin_create_task(
         
         # Извлекаем обязательные поля с проверкой
         secret = form.get("secret")
+        if not secret:
+            logger.error("❌ Секрет не передан в форме")
+            raise ValueError("Секрет не передан")
+        
         chat_id = form.get("chat_id")
         message_text = form.get("message_text")
         publish_at_local = form.get("publish_at_local")
@@ -487,18 +508,20 @@ async def admin_create_task(
         
         # Проверяем обязательные поля
         missing_fields = []
-        if not chat_id:
+        if not chat_id or not chat_id.strip():
             missing_fields.append("chat_id")
-        if not message_text:
+        if not message_text or not message_text.strip():
             missing_fields.append("message_text")
-        if not publish_at_local:
+        if not publish_at_local or not publish_at_local.strip():
             missing_fields.append("publish_at_local")
-        if not recurrence:
+        if not recurrence or not recurrence.strip():
             missing_fields.append("recurrence")
         
         if missing_fields:
             logger.error(f"❌ Отсутствуют обязательные поля: {', '.join(missing_fields)}")
-            raise ValueError(f"Отсутствуют обязательные поля: {', '.join(missing_fields)}")
+            error_msg = f"Отсутствуют обязательные поля: {', '.join(missing_fields)}"
+            redirect_url = get_safe_redirect_url("/admin", secret, error_msg)
+            return RedirectResponse(url=redirect_url, status_code=303)
         
         # Логируем полученные данные
         logger.debug(f"✅ Получены обязательные поля: chat_id={chat_id}, message_text={message_text}, publish_at_local={publish_at_local}, recurrence={recurrence}")
@@ -518,7 +541,9 @@ async def admin_create_task(
             logger.debug(f"⏰ Распарсенная дата: {publish_at_utc}")
         except (ValueError, TypeError) as e:
             logger.warning(f"⚠️ Ошибка парсинга даты: {e}")
-            raise ValueError(f"Неверный формат даты: {e}")
+            error_msg = f"Неверный формат даты: {e}"
+            redirect_url = get_safe_redirect_url("/admin", secret, error_msg)
+            return RedirectResponse(url=redirect_url, status_code=303)
 
         # Определяем тип медиа
         media_type = detect_media_type(media_file_id.strip()) if media_file_id and media_file_id.strip() else None
@@ -567,20 +592,22 @@ async def admin_create_task(
             logger.info(f"✅ Задача создана через админку: ID={msg_id}")
         except Exception as e:
             logger.error(f"❌ Ошибка добавления задачи в БД: {e}")
-            raise
+            error_msg = f"Ошибка базы данных: {e}"
+            redirect_url = get_safe_redirect_url("/admin", secret, error_msg)
+            return RedirectResponse(url=redirect_url, status_code=303)
 
-        # Перенаправляем на админку с секретом
-        redirect_url = f"/admin?secret={quote(str(secret))}" if secret else "/admin"
+        # Перенаправляем на админку с секретом (без ошибки)
+        redirect_url = get_safe_redirect_url("/admin", secret)
         logger.info(f"🔄 Редирект на: {redirect_url}")
         return RedirectResponse(url=redirect_url, status_code=303)
 
     except ValueError as e:
         logger.warning(f"⚠️ Ошибка создания задачи: {e}")
-        redirect_url = f"/admin?secret={quote(str(secret))}&error={quote(str(e))}" if secret else f"/admin?error={quote(str(e))}"
+        redirect_url = get_safe_redirect_url("/admin", secret, str(e))
         return RedirectResponse(url=redirect_url, status_code=303)
     except Exception as e:
         logger.exception(f"❌ Неожиданная ошибка при создании задачи: {e}")
-        redirect_url = f"/admin?secret={quote(str(secret))}&error=internal_error" if secret else "/admin?error=internal_error"
+        redirect_url = get_safe_redirect_url("/admin", secret, "internal_error")
         return RedirectResponse(url=redirect_url, status_code=303)
 
 @app.get("/admin/edit/{task_id}", response_class=HTMLResponse, summary="Edit task form")
@@ -683,8 +710,13 @@ async def admin_save_edit(
         # Получаем данные формы
         form = await request.form()
         
-        # Извлекаем обязательные поля
+        # Извлекаем секрет
         secret = form.get("secret")
+        if not secret:
+            logger.error("❌ Секрет не передан в форме редактирования")
+            raise ValueError("Секрет не передан")
+        
+        # Извлекаем обязательные поля
         chat_id = form.get("chat_id")
         message_text = form.get("message_text")
         publish_at_local = form.get("publish_at_local")
@@ -692,18 +724,20 @@ async def admin_save_edit(
         
         # Проверяем обязательные поля
         missing_fields = []
-        if not chat_id:
+        if not chat_id or not chat_id.strip():
             missing_fields.append("chat_id")
-        if not message_text:
+        if not message_text or not message_text.strip():
             missing_fields.append("message_text")
-        if not publish_at_local:
+        if not publish_at_local or not publish_at_local.strip():
             missing_fields.append("publish_at_local")
-        if not recurrence:
+        if not recurrence or not recurrence.strip():
             missing_fields.append("recurrence")
         
         if missing_fields:
-            logger.error(f"❌ Отсутствуют обязательные поля: {', '.join(missing_fields)}")
-            raise ValueError(f"Отсутствуют обязательные поля: {', '.join(missing_fields)}")
+            logger.error(f"❌ Отсутствуют обязательные поля при редактировании: {', '.join(missing_fields)}")
+            error_msg = f"Отсутствуют обязательные поля: {', '.join(missing_fields)}"
+            redirect_url = get_safe_redirect_url(f"/admin/edit/{task_id}", secret, error_msg)
+            return RedirectResponse(url=redirect_url, status_code=303)
         
         # Извлекаем необязательные поля
         media_file_id = form.get("media_file_id")
@@ -717,7 +751,9 @@ async def admin_save_edit(
             publish_at_utc = utc_naive.isoformat()
         except (ValueError, TypeError) as e:
             logger.warning(f"⚠️ Ошибка парсинга даты: {e}")
-            raise ValueError(f"Неверный формат даты: {e}")
+            error_msg = f"Неверный формат даты: {e}"
+            redirect_url = get_safe_redirect_url(f"/admin/edit/{task_id}", secret, error_msg)
+            return RedirectResponse(url=redirect_url, status_code=303)
 
         # Определяем тип медиа
         media_type = detect_media_type(media_file_id.strip()) if media_file_id and media_file_id.strip() else None
@@ -755,23 +791,25 @@ async def admin_save_edit(
         
         if not success:
             logger.warning(f"⚠️ Задача {task_id} не найдена для обновления")
-            raise HTTPException(status_code=404, detail="Задача не найдена")
+            error_msg = "Задача не найдена для обновления"
+            redirect_url = get_safe_redirect_url(f"/admin/edit/{task_id}", secret, error_msg)
+            return RedirectResponse(url=redirect_url, status_code=303)
         
         logger.info(f"✅ Задача {task_id} обновлена через админку")
         
-        # Перенаправляем на админку с секретом
-        redirect_url = f"/admin?secret={quote(str(secret))}" if secret else "/admin"
+        # Перенаправляем на админку с секретом (без ошибки)
+        redirect_url = get_safe_redirect_url("/admin", secret)
         return RedirectResponse(url=redirect_url, status_code=303)
 
     except ValueError as e:
         logger.warning(f"⚠️ Ошибка обновления задачи {task_id}: {e}")
-        redirect_url = f"/admin/edit/{task_id}?secret={quote(str(secret))}&error={quote(str(e))}" if secret else f"/admin/edit/{task_id}?error={quote(str(e))}"
+        redirect_url = get_safe_redirect_url(f"/admin/edit/{task_id}", secret, str(e))
         return RedirectResponse(url=redirect_url, status_code=303)
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"❌ Ошибка при сохранении задачи {task_id}: {e}")
-        redirect_url = f"/admin/edit/{task_id}?secret={quote(str(secret))}&error=internal_error" if secret else f"/admin/edit/{task_id}?error=internal_error"
+        redirect_url = get_safe_redirect_url(f"/admin/edit/{task_id}", secret, "internal_error")
         return RedirectResponse(url=redirect_url, status_code=303)
 
 @app.post("/admin/delete/{task_id}", summary="Delete task")
@@ -786,24 +824,32 @@ async def admin_delete_task(
         # Получаем данные формы
         form = await request.form()
         secret = form.get("secret")
+        if not secret:
+            logger.error("❌ Секрет не передан при удалении задачи")
+            raise ValueError("Секрет не передан")
         
         success = deactivate_message(task_id)
         if not success:
             logger.warning(f"⚠️ Задача {task_id} не найдена для удаления")
-            raise HTTPException(status_code=404, detail="Задача не найдена")
+            error_msg = "Задача не найдена для удаления"
+            redirect_url = get_safe_redirect_url("/admin", secret, error_msg)
+            return RedirectResponse(url=redirect_url, status_code=303)
         
         TASKS_DELETED.inc()
         logger.info(f"✅ Задача {task_id} удалена через админку")
         
-        # Перенаправляем на админку с секретом
-        redirect_url = f"/admin?secret={quote(str(secret))}" if secret else "/admin"
+        # Перенаправляем на админку с секретом (без ошибки)
+        redirect_url = get_safe_redirect_url("/admin", secret)
         return RedirectResponse(url=redirect_url, status_code=303)
     
-    except HTTPException:
-        raise
+    except ValueError as e:
+        logger.warning(f"⚠️ Ошибка удаления задачи {task_id}: {e}")
+        redirect_url = get_safe_redirect_url("/admin", secret, str(e))
+        return RedirectResponse(url=redirect_url, status_code=303)
     except Exception as e:
         logger.exception(f"❌ Ошибка удаления задачи {task_id}: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        redirect_url = get_safe_redirect_url("/admin", secret, "internal_error")
+        return RedirectResponse(url=redirect_url, status_code=303)
 
 @app.get("/admin/export.csv", summary="Export tasks to CSV")
 async def export_tasks_csv(
@@ -814,6 +860,11 @@ async def export_tasks_csv(
     logger.info("📥 Экспорт задач в CSV")
     
     try:
+        # Проверка секрета
+        if ADMIN_SECRET and secret != ADMIN_SECRET:
+            logger.warning(f"🚫 Попытка экспорта без прав: секрет={secret}")
+            raise HTTPException(status_code=403, detail="Admin access required for export")
+        
         raw_tasks = get_all_active_messages()
         tasks = [safe_dict(task) for task in raw_tasks]
         
