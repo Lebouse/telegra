@@ -224,7 +224,13 @@
         {% if edit_task or show_create_form %}
         <div class="form-section">
             <h2>{% if edit_task and edit_task.id %}Редактирование напоминания #{{ edit_task.id }}{% else %}Создать новое напоминание{% endif %}</h2>
-            <form method="post" action="{% if edit_task and edit_task.id %}/admin/edit/{{ edit_task.id }}{% else %}/admin/create{% endif %}" id="task-form">
+            
+            {% if edit_task and edit_task.id %}
+                <form method="post" action="/admin/edit/{{ edit_task.id }}" id="task-form">
+            {% else %}
+                <form method="post" action="/admin/create" id="task-form">
+            {% endif %}
+            
                 <input type="hidden" name="secret" value="{{ current_secret }}">
 
                 <div class="form-group">
@@ -363,41 +369,16 @@
             // Добавляем секрет ко всем ссылкам
             document.querySelectorAll('a[href]').forEach(a => {
                 const url = new URL(a.href, window.location.href);
-                if (url.origin === window.location.origin) {
+                if (url.origin === window.location.origin && !url.searchParams.has('secret')) {
                     url.searchParams.set('secret', secret);
                     a.href = url.toString();
                 }
             });
             
-            // Добавляем секрет ко всем формам
-            document.querySelectorAll('form').forEach(form => {
-                let secretInput = form.querySelector('input[name="secret"]');
-                if (!secretInput) {
-                    secretInput = document.createElement('input');
-                    secretInput.type = 'hidden';
-                    secretInput.name = 'secret';
-                    secretInput.value = secret;
-                    form.appendChild(secretInput);
-                }
-            });
-        });
-
-        // Валидация даты перед отправкой формы
-        document.addEventListener('DOMContentLoaded', () => {
+            // Убираем обработчик отправки формы (пусть браузер сам отправляет POST)
             const form = document.getElementById('task-form');
             if (form) {
-                form.addEventListener('submit', function(e) {
-                    const dateInput = this.querySelector('input[name="publish_at_local"]');
-                    if (dateInput && dateInput.value) {
-                        const datePattern = /^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}$/;
-                        if (!datePattern.test(dateInput.value)) {
-                            e.preventDefault();
-                            alert('Неверный формат даты. Используйте формат: ДД.ММ.ГГГГ ЧЧ:ММ');
-                            return false;
-                        }
-                    }
-                    return true;
-                });
+                form.onsubmit = null; // Отключаем кастомную обработку
             }
         });
     </script>
